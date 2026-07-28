@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Raw competition data and generated artifacts stay local.
+data/
+artifacts/
+download_status.json
+download_stdout.log
+download_stderr.log

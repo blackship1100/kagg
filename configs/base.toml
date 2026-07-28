@@ -1,0 +1,83 @@
+[paths]
+data_dir = "../data"
+artifacts_dir = "../artifacts"
+cache_dir = "../artifacts/cache"
+
+[dataset]
+train_sample_count = 1257637
+test_sample_count = 647896
+
+[cleaning]
+strict_schema = true
+feature_clip_quantiles = [0.001, 0.999]
+volume_transform = "log1p"
+
+[sequence]
+time_order = "seconds_desc"
+market_max_length = 212
+order_max_length = 999
+transaction_max_length = 999
+
+[cache]
+format_version = 1
+shard_size = 25000
+checksum_algorithm = "sha256"
+parquet_compression = "zstd"
+
+[features]
+market_windows = [5, 10, 30, 60, 180, 600]
+order_windows = [1, 2, 5, 10, 30, 60]
+transaction_windows = [1, 2, 5, 10, 30, 60]
+order_distance_bins_bps = [10, 50, 200]
+large_order_volume = 10000
+large_trade_volume = 10000
+order_price_clip = [0.5, 1.5]
+
+[runtime]
+threads = 14
+seeds = [17, 43, 97]
+
+[model.lightgbm]
+objective = "regression_l2"
+learning_rate = 0.03
+num_leaves = 127
+min_data_in_leaf = 500
+feature_fraction = 0.8
+bagging_fraction = 0.8
+bagging_freq = 1
+lambda_l2 = 1.0
+max_bin = 255
+max_rounds = 5000
+early_stopping_rounds = 200
+
+[deep_learning]
+device_profile = "single_16gb"
+market_max_steps = 212
+event_max_steps = 256
+event_grid_steps = 60
+hidden_size = 128
+attention_layers = 4
+attention_heads = 4
+physical_batch_size = 32
+effective_batch_size = 256
+max_vram_gb = 15.0
+
+[[validation.folds]]
+name = "fold_1"
+train_months = [0, 46]
+valid_months = [47, 54]
+
+[[validation.folds]]
+name = "fold_2"
+train_months = [0, 54]
+valid_months = [55, 62]
+
+[[validation.folds]]
+name = "fold_3"
+train_months = [0, 62]
+valid_months = [63, 66]
+
+[[validation.folds]]
+name = "fold_4"
+train_months = [0, 66]
+valid_months = [67, 70]

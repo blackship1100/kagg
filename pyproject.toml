@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mscapital-research"
+version = "0.1.0"
+description = "Maintainable research pipeline for MSCapital market forecasting"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "pyarrow>=18",
+    "scikit-learn>=1.6",
+    "lightgbm>=4.6,<5",
+]
+
+[project.scripts]
+mscapital = "mscapital.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
