@@ -178,3 +178,7 @@ NCCL、Slurm 或 PRO 6000 专用优化。
 Market TCN、Transaction Event Transformer、Transaction Grid TCN、门控融合、滚动 OOF、
 测试推理和 LightGBM OOF 融合已经实现。架构、缓存格式、真实 1,000 样本冒烟结果及 GPU
 复现命令见 [`docs/P2_DEEP_LEARNING_CN.md`](docs/P2_DEEP_LEARNING_CN.md)。
+
+将工作迁移到 RTX 5070 Ti、4090 或 5090 电脑时，请按
+[`docs/GPU_HANDOFF_CN.md`](docs/GPU_HANDOFF_CN.md) 完成数据/缓存迁移、CUDA 验证、正式四折训练和
+后续消融。该文档也记录了三类显卡的预计耗时、恢复方式和按优先级排序的优化路线。
