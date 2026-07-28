@@ -87,6 +87,17 @@ class DeepLearningConfig:
     physical_batch_size: int
     effective_batch_size: int
     max_vram_gb: float
+    dropout: float
+    learning_rate: float
+    weight_decay: float
+    epochs: int
+    warmup_ratio: float
+    cosine_loss_weight: float
+    gradient_clip_norm: float
+    early_stopping_patience: int
+    num_workers: int
+    gradient_checkpointing: bool
+    minimum_batch_size: int
 
 
 @dataclass(frozen=True)
@@ -110,7 +121,7 @@ class ProjectConfig:
     folds: tuple[FoldConfig, ...]
 
     @classmethod
-    def from_toml(cls, path: str | Path) -> "ProjectConfig":
+    def from_toml(cls, path: str | Path) -> ProjectConfig:
         config_path = Path(path).resolve()
         with config_path.open("rb") as handle:
             raw = tomllib.load(handle)
@@ -159,15 +170,21 @@ class ProjectConfig:
                 parquet_compression=str(cache["parquet_compression"]),
             ),
             features=FeaturesConfig(
-                market_windows=_tuple(features["market_windows"], "market_windows", int),
+                market_windows=_tuple(
+                    features["market_windows"], "market_windows", int
+                ),
                 order_windows=_tuple(features["order_windows"], "order_windows", int),
-                transaction_windows=_tuple(features["transaction_windows"], "transaction_windows", int),
+                transaction_windows=_tuple(
+                    features["transaction_windows"], "transaction_windows", int
+                ),
                 order_distance_bins_bps=_tuple(
                     features["order_distance_bins_bps"], "order_distance_bins_bps", int
                 ),
                 large_order_volume=int(features["large_order_volume"]),
                 large_trade_volume=int(features["large_trade_volume"]),
-                order_price_clip=_pair(features["order_price_clip"], "order_price_clip", float),
+                order_price_clip=_pair(
+                    features["order_price_clip"], "order_price_clip", float
+                ),
             ),
             runtime=RuntimeConfig(
                 threads=int(runtime["threads"]),
@@ -202,6 +219,21 @@ class ProjectConfig:
                 physical_batch_size=int(deep_learning["physical_batch_size"]),
                 effective_batch_size=int(deep_learning["effective_batch_size"]),
                 max_vram_gb=float(deep_learning["max_vram_gb"]),
+                dropout=float(deep_learning.get("dropout", 0.10)),
+                learning_rate=float(deep_learning.get("learning_rate", 2e-4)),
+                weight_decay=float(deep_learning.get("weight_decay", 1e-3)),
+                epochs=int(deep_learning.get("epochs", 20)),
+                warmup_ratio=float(deep_learning.get("warmup_ratio", 0.05)),
+                cosine_loss_weight=float(deep_learning.get("cosine_loss_weight", 0.0)),
+                gradient_clip_norm=float(deep_learning.get("gradient_clip_norm", 1.0)),
+                early_stopping_patience=int(
+                    deep_learning.get("early_stopping_patience", 4)
+                ),
+                num_workers=int(deep_learning.get("num_workers", 2)),
+                gradient_checkpointing=bool(
+                    deep_learning.get("gradient_checkpointing", False)
+                ),
+                minimum_batch_size=int(deep_learning.get("minimum_batch_size", 4)),
             ),
             folds=tuple(
                 FoldConfig(

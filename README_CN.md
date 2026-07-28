@@ -172,3 +172,9 @@ NCCL、Slurm 或 PRO 6000 专用优化。
 
 - `train/label.feather`：1,257,637 行、3 列，无缺失值。
 - `submission.csv`：647,896 行、2 列。
+
+## P2 实现状态
+
+Market TCN、Transaction Event Transformer、Transaction Grid TCN、门控融合、滚动 OOF、
+测试推理和 LightGBM OOF 融合已经实现。架构、缓存格式、真实 1,000 样本冒烟结果及 GPU
+复现命令见 [`docs/P2_DEEP_LEARNING_CN.md`](docs/P2_DEEP_LEARNING_CN.md)。

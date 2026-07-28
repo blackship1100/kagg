@@ -4,13 +4,13 @@ import argparse
 import json
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from mscapital.config import ProjectConfig
-from mscapital.data.catalog import DataCatalog, failed_validations
-from mscapital.data.canonical import CanonicalStore
 from mscapital.contracts import Split, TableName
+from mscapital.data.canonical import CanonicalStore
+from mscapital.data.catalog import DataCatalog, failed_validations
 from mscapital.features.store import FEATURE_BLOCKS, FeatureStore
 from mscapital.training.ensemble import ensemble_runs
 from mscapital.training.submission import make_submission
@@ -26,9 +26,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mscapital")
     parser.add_argument("--config", type=Path, default=Path("configs/base.toml"))
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("validate-data", help="Validate required files and Feather schemas")
+    subparsers.add_parser(
+        "validate-data", help="Validate required files and Feather schemas"
+    )
 
-    cache = subparsers.add_parser("build-cache", help="Build aligned canonical column shards")
+    cache = subparsers.add_parser(
+        "build-cache", help="Build aligned canonical column shards"
+    )
     _add_split(cache)
     cache.add_argument(
         "--table",
@@ -38,17 +42,32 @@ def build_parser() -> argparse.ArgumentParser:
     _add_build_options(cache)
     cache.add_argument("--in-process", action="store_true", help=argparse.SUPPRESS)
 
-    features = subparsers.add_parser("build-features", help="Build sample-level feature blocks")
+    features = subparsers.add_parser(
+        "build-features", help="Build sample-level feature blocks"
+    )
     _add_split(features)
     _add_build_options(features)
 
-    baselines = subparsers.add_parser("run-baselines", help="Evaluate deterministic baselines")
+    sequences = subparsers.add_parser(
+        "build-sequences",
+        help="Build model-ready market and transaction sequence shards",
+    )
+    _add_split(sequences)
+    _add_build_options(sequences)
+
+    baselines = subparsers.add_parser(
+        "run-baselines", help="Evaluate deterministic baselines"
+    )
     baselines.add_argument("--max-samples", type=int)
     baselines.add_argument("--resume", action="store_true")
 
-    train = subparsers.add_parser("train-tabular", help="Train rolling LightGBM OOF models")
+    train = subparsers.add_parser(
+        "train-tabular", help="Train rolling LightGBM OOF models"
+    )
     train.add_argument("--resume", action="store_true")
-    train.add_argument("--blocks", nargs="+", choices=FEATURE_BLOCKS, default=list(FEATURE_BLOCKS))
+    train.add_argument(
+        "--blocks", nargs="+", choices=FEATURE_BLOCKS, default=list(FEATURE_BLOCKS)
+    )
     train.add_argument("--seeds", nargs="+", type=int)
     train.add_argument("--exclude-pattern", action="append", default=[])
     train.add_argument("--recent-months", type=int)
@@ -82,11 +101,15 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--run-id", required=True)
     evaluate.add_argument("--resume", action="store_true")
 
-    predict = subparsers.add_parser("predict-test", help="Fit full models and predict test data")
+    predict = subparsers.add_parser(
+        "predict-test", help="Fit full models and predict test data"
+    )
     predict.add_argument("--run-id", required=True)
     predict.add_argument("--resume", action="store_true")
 
-    submission = subparsers.add_parser("make-submission", help="Validate and write submission CSV")
+    submission = subparsers.add_parser(
+        "make-submission", help="Validate and write submission CSV"
+    )
     submission.add_argument("--run-id", required=True)
     submission.add_argument("--output", type=Path)
     submission.add_argument("--resume", action="store_true")
@@ -96,6 +119,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ensemble.add_argument("--run-id", nargs="+", required=True)
     ensemble.add_argument("--weight", nargs="+", type=float)
+
+    deep = subparsers.add_parser(
+        "train-deep", help="Train rolling Market/Transaction deep sequence models"
+    )
+    deep.add_argument("--resume", action="store_true")
+    deep.add_argument("--seed", type=int, default=17)
+    deep.add_argument("--fold", action="append", default=[])
+    deep.add_argument("--epochs", type=int)
+    deep.add_argument("--device", default="auto")
+    deep.add_argument("--max-samples", type=int)
+
+    deep_predict = subparsers.add_parser(
+        "predict-deep-test", help="Predict test data with saved deep fold models"
+    )
+    deep_predict.add_argument("--run-id", required=True)
+    deep_predict.add_argument("--resume", action="store_true")
+    deep_predict.add_argument("--device", default="auto")
+
+    blend = subparsers.add_parser(
+        "blend-tabular-deep", help="Blend aligned LightGBM and deep OOF predictions"
+    )
+    blend.add_argument("--tabular-run-id", required=True)
+    blend.add_argument("--deep-run-id", required=True)
+    blend.add_argument("--deep-weight", type=float)
+
+    smoke = subparsers.add_parser(
+        "smoke-deep", help="Run a real-data cache/train/save/reload deep smoke test"
+    )
+    smoke.add_argument("--max-samples", type=int, default=1000)
+    smoke.add_argument("--seed", type=int, default=17)
+    smoke.add_argument("--device", default="auto")
+    smoke.add_argument("--resume", action="store_true")
+    smoke.add_argument("--max-train-batches", type=int)
+    smoke.add_argument(
+        "--full-model", action="store_true", help="Use the production-width model"
+    )
     return parser
 
 
@@ -177,6 +236,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("[OK] train/test feature schemas match")
         return 0
 
+    if args.command == "build-sequences":
+        from mscapital.deep_learning.sequences import SequenceStore
+
+        store = SequenceStore(config)
+        for split in _splits(args.split):
+            manifest = store.build(
+                split, resume=args.resume, max_samples=args.max_samples
+            )
+            print(
+                f"[OK] {split.value}: {manifest.sample_count:,} samples, "
+                f"{len(manifest.parts)} sequence shards"
+            )
+        return 0
+
     if args.command == "run-baselines":
         path, report = run_baselines(
             config, max_samples=args.max_samples, resume=args.resume
@@ -209,7 +282,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "evaluate-oof":
-        print(json.dumps(read_metrics(config, args.run_id), ensure_ascii=False, indent=2))
+        print(
+            json.dumps(read_metrics(config, args.run_id), ensure_ascii=False, indent=2)
+        )
         return 0
 
     if args.command == "predict-test":
@@ -232,6 +307,60 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(metrics, ensure_ascii=False, indent=2))
         print(f"Run ID: {ensemble_id}")
+        return 0
+
+    if args.command == "train-deep":
+        from mscapital.deep_learning.training import train_deep_oof
+
+        run_id, metrics = train_deep_oof(
+            config,
+            resume=args.resume,
+            seed=args.seed,
+            fold_names=tuple(args.fold) if args.fold else None,
+            epochs=args.epochs,
+            device=args.device,
+            max_samples=args.max_samples,
+        )
+        print(json.dumps(metrics, ensure_ascii=False, indent=2))
+        print(f"Run ID: {run_id}")
+        return 0
+
+    if args.command == "predict-deep-test":
+        from mscapital.deep_learning.training import predict_deep_test
+
+        path = predict_deep_test(
+            config, args.run_id, resume=args.resume, device=args.device
+        )
+        print(f"Saved: {path}")
+        return 0
+
+    if args.command == "blend-tabular-deep":
+        from mscapital.deep_learning.blend import blend_tabular_deep
+
+        run_id, metrics = blend_tabular_deep(
+            config,
+            args.tabular_run_id,
+            args.deep_run_id,
+            deep_weight=args.deep_weight,
+        )
+        print(json.dumps(metrics, ensure_ascii=False, indent=2))
+        print(f"Run ID: {run_id}")
+        return 0
+
+    if args.command == "smoke-deep":
+        from mscapital.deep_learning.training import smoke_deep
+
+        output_dir, report = smoke_deep(
+            config,
+            max_samples=args.max_samples,
+            seed=args.seed,
+            device=args.device,
+            resume=args.resume,
+            max_train_batches=args.max_train_batches,
+            full_model=args.full_model,
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        print(f"Saved: {output_dir}")
         return 0
 
     raise AssertionError(f"Unhandled command: {args.command}")

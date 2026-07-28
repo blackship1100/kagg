@@ -61,6 +61,17 @@ attention_heads = 4
 physical_batch_size = 32
 effective_batch_size = 256
 max_vram_gb = 15.0
+dropout = 0.10
+learning_rate = 0.0002
+weight_decay = 0.001
+epochs = 20
+warmup_ratio = 0.05
+cosine_loss_weight = 0.0
+gradient_clip_norm = 1.0
+early_stopping_patience = 4
+num_workers = 2
+gradient_checkpointing = false
+minimum_batch_size = 4
 
 [[validation.folds]]
 name = "fold_1"

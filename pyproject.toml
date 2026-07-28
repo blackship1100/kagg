@@ -15,6 +15,11 @@ dependencies = [
     "lightgbm>=4.6,<5",
 ]
 
+[project.optional-dependencies]
+deep-learning = [
+    "torch>=2.8,<3",
+]
+
 [project.scripts]
 mscapital = "mscapital.cli:main"
 
