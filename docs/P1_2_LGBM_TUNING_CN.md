@@ -52,8 +52,15 @@ P1.2 三 seed保守 LightGBM             50%
 - 测试预测：`artifacts/runs/postprocess-c4e1780b90d171bc/test_prediction.npy`
 - 本地提交文件：`artifacts/submissions/postprocess-c4e1780b90d171bc.csv`
 
-提交 CSV 已通过行数、连续唯一 ID、有限预测和非零范数校验。Kaggle API 的 OAuth
-刷新成功，但本机网络连接 Google 的上传端点超时，因此截至本文件生成时尚未创建远端提交。
+提交 CSV 已通过行数、连续唯一 ID、有限预测和非零范数校验。已通过 Kaggle API 提交：
+
+- 提交编号：`55082138`
+- 远端状态：`COMPLETE`
+- Public Score：`0.132`
+
+该分数与 P1.1 提交持平。离线 OOF 的提升没有在本次 Public LB 上转化为增益，因此不应
+继续依据该单次榜单结果调整融合权重或 signed-power 指数；后续优先进行更稳健的时间分段
+消融和深度模型 OOF 融合。
 
 ## 新增命令
 
