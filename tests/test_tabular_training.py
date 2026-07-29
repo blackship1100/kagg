@@ -8,18 +8,18 @@ from pathlib import Path
 
 import numpy as np
 
-from mscapital.contracts import FeatureMatrix
-from mscapital.contracts import Split, TableName
+from mscapital.contracts import FeatureMatrix, Split, TableName
 from mscapital.data.canonical import CanonicalStore
 from mscapital.features.store import FeatureStore
 from mscapital.training.tabular import (
-    _clip_target,
     _add_derived_features,
+    _clip_target,
     _exclude_features,
     _experiment_payload,
     _normalize_target,
     _recency_weights,
     _restrict_to_recent_months,
+    _validate_model_overrides,
     read_metrics,
     train_oof,
 )
@@ -78,10 +78,7 @@ class TabularTrainingIntegrationTests(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["model"]["objective"], "huber")
             scaled_manifest_path = (
-                config.paths.artifacts_dir
-                / "runs"
-                / scaled_huber_run
-                / "manifest.json"
+                config.paths.artifacts_dir / "runs" / scaled_huber_run / "manifest.json"
             )
             scaled_manifest = json.loads(
                 scaled_manifest_path.read_text(encoding="utf-8")
@@ -102,13 +99,15 @@ class TabularExperimentTests(unittest.TestCase):
             (None, 0.0, None),
             (None, None, (0.9, 0.1)),
         ):
-            with self.subTest(
-                recent_months=recent_months,
-                half_life=half_life,
-                quantiles=quantiles,
+            with (
+                self.subTest(
+                    recent_months=recent_months,
+                    half_life=half_life,
+                    quantiles=quantiles,
+                ),
+                self.assertRaises(ValueError),
             ):
-                with self.assertRaises(ValueError):
-                    _experiment_payload((), recent_months, half_life, quantiles)
+                _experiment_payload((), recent_months, half_life, quantiles)
 
     def test_feature_exclusion_uses_glob_patterns_and_preserves_order(self) -> None:
         matrix = FeatureMatrix(
@@ -121,9 +120,7 @@ class TabularExperimentTests(unittest.TestCase):
                 "transaction__w10__volume_imbalance",
             ),
         )
-        filtered = _exclude_features(
-            matrix, ("*__row_count", "order__w*__event_rate")
-        )
+        filtered = _exclude_features(matrix, ("*__row_count", "order__w*__event_rate"))
         self.assertEqual(
             filtered.names,
             (
@@ -200,8 +197,142 @@ class TabularExperimentTests(unittest.TestCase):
         augmented = _add_derived_features(matrix, ("order_category_ratios",))
         self.assertEqual(augmented.values.shape[1], matrix.values.shape[1] + 48)
         result = dict(zip(augmented.names, augmented.values.T))
-        np.testing.assert_allclose(result["order__w1__buy_new_count_share"], [0.25, 0.0])
-        np.testing.assert_allclose(result["order__w1__sell_cancel_volume_share"], [0.4, 0.0])
+        np.testing.assert_allclose(
+            result["order__w1__buy_new_count_share"], [0.25, 0.0]
+        )
+        np.testing.assert_allclose(
+            result["order__w1__sell_cancel_volume_share"], [0.4, 0.0]
+        )
+
+    def test_order_pressure_features_have_expected_direction(self) -> None:
+        names: list[str] = []
+        columns: list[np.ndarray] = []
+        count_values = (4.0, 1.0, 1.0, 3.0)
+        volume_values = (40.0, 10.0, 10.0, 30.0)
+        for window in (1, 2, 5, 10, 30, 60):
+            prefix = f"order__w{window}"
+            for category, count, volume in zip(
+                ("buy_new", "buy_cancel", "sell_new", "sell_cancel"),
+                count_values,
+                volume_values,
+            ):
+                names.extend(
+                    (
+                        f"{prefix}__{category}_count",
+                        f"{prefix}__{category}_volume_logsum",
+                    )
+                )
+                columns.extend(
+                    (
+                        np.asarray([count, 0.0], dtype=np.float32),
+                        np.log1p(np.asarray([volume, 0.0], dtype=np.float32)),
+                    )
+                )
+        matrix = FeatureMatrix(
+            np.asarray([0, 1], dtype=np.int32),
+            np.column_stack(columns),
+            tuple(names),
+        )
+        augmented = _add_derived_features(matrix, ("order_pressure",))
+        self.assertEqual(augmented.values.shape[1], matrix.values.shape[1] + 48)
+        result = dict(zip(augmented.names, augmented.values.T))
+        np.testing.assert_allclose(result["order__w1__new_count_imbalance"], [0.6, 0.0])
+        np.testing.assert_allclose(
+            result["order__w1__cancel_count_imbalance"], [0.5, 0.0]
+        )
+        np.testing.assert_allclose(
+            result["order__w1__action_count_pressure"], [5.0 / 9.0, 0.0]
+        )
+        np.testing.assert_allclose(
+            result["order__w1__buy_cancel_count_rate"], [0.2, 0.0]
+        )
+
+    def test_temporal_dynamics_are_finite_and_use_long_window_reference(self) -> None:
+        matrix = _temporal_feature_matrix()
+        augmented = _add_derived_features(matrix, ("temporal_dynamics",))
+        self.assertEqual(augmented.values.shape[1], matrix.values.shape[1] + 77)
+        derived = augmented.values[:, matrix.values.shape[1] :]
+        self.assertTrue(np.isfinite(derived).all())
+        result = dict(zip(augmented.names, augmented.values.T))
+        np.testing.assert_allclose(
+            result["dynamics__w10_w60__transaction_count_imbalance_change"],
+            [-0.5, -1.0],
+        )
+        np.testing.assert_allclose(
+            result["dynamics__w10_w600__spread_mean_change"], [-5.9, -11.8]
+        )
+        np.testing.assert_allclose(
+            result["dynamics__w10__trend_efficiency"], [0.5, 0.5]
+        )
+
+    def test_model_override_validation(self) -> None:
+        valid = {
+            "learning_rate": 0.02,
+            "num_leaves": 63,
+            "min_data_in_leaf": 1000,
+            "feature_fraction": 0.9,
+            "bagging_fraction": 0.9,
+            "lambda_l2": 2.0,
+            "max_bin": 255,
+            "max_rounds": 3000,
+            "early_stopping_rounds": 100,
+        }
+        _validate_model_overrides(**valid)
+        for name, value in (
+            ("learning_rate", 0.0),
+            ("num_leaves", 1),
+            ("feature_fraction", 1.1),
+            ("bagging_fraction", 0.0),
+            ("lambda_l2", -1.0),
+        ):
+            with self.subTest(name=name):
+                invalid = {**valid, name: value}
+                with self.assertRaises(ValueError):
+                    _validate_model_overrides(**invalid)
+
+
+def _temporal_feature_matrix() -> FeatureMatrix:
+    names: list[str] = []
+    columns: list[np.ndarray] = []
+
+    def append(name: str, value: float) -> None:
+        names.append(name)
+        columns.append(np.asarray([value, value * 2.0], dtype=np.float32))
+
+    for window in (1, 2, 5, 10, 30, 60):
+        prefix = f"order__w{window}"
+        for index, category in enumerate(
+            ("buy_new", "buy_cancel", "sell_new", "sell_cancel"), start=1
+        ):
+            append(f"{prefix}__{category}_count", float(index + window))
+            append(
+                f"{prefix}__{category}_volume_logsum",
+                float(np.log1p(index * 10 + window)),
+            )
+        append(f"{prefix}__signed_volume_imbalance", window / 100.0)
+        append(f"{prefix}__cancel_count_rate", window / 200.0)
+        append(f"{prefix}__cancel_volume_rate", window / 300.0)
+        transaction_prefix = f"transaction__w{window}"
+        append(f"{transaction_prefix}__count_imbalance", window / 100.0)
+        append(f"{transaction_prefix}__volume_imbalance", window / 80.0)
+        append(f"{transaction_prefix}__vwap_bps", float(window))
+        append(f"{transaction_prefix}__price_bps__mean", float(window * 2))
+
+    for window in (5, 10, 30, 60, 180, 600):
+        prefix = f"market__w{window}"
+        append(f"{prefix}__mid_bps__std", window / 100.0)
+        append(f"{prefix}__realized_vol_bps", window / 50.0)
+        append(f"{prefix}__spread_bps__mean", window / 100.0)
+        append(f"{prefix}__mid_bps__slope", window / 1000.0)
+        append(f"{prefix}__imbalance_l2__mean", window / 200.0)
+        append(f"{prefix}__mid_bps__delta", window / 100.0)
+        append(f"{prefix}__mid_bps__max", window / 100.0)
+        append(f"{prefix}__mid_bps__min", -window / 100.0)
+    return FeatureMatrix(
+        np.asarray([0, 1], dtype=np.int32),
+        np.column_stack(columns),
+        tuple(names),
+    )
 
 
 if __name__ == "__main__":

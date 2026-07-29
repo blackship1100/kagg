@@ -26,6 +26,12 @@ from mscapital.validation.baselines import BASELINE_FEATURES, evaluate_baselines
 from mscapital.validation.metrics import cosine_report, cosine_score
 from mscapital.validation.splits import folds_from_config
 
+DERIVED_FEATURE_SETS = (
+    "order_category_ratios",
+    "order_pressure",
+    "temporal_dynamics",
+)
+
 
 def load_labels(
     config: ProjectConfig,
@@ -40,9 +46,15 @@ def load_labels(
     months = table["month"].to_numpy(zero_copy_only=False)
     sample_ids = table["sample_id"].to_numpy(zero_copy_only=False)
     target = table["target"].to_numpy(zero_copy_only=False)
-    if not np.array_equal(sample_ids, np.arange(len(sample_ids), dtype=sample_ids.dtype)):
+    if not np.array_equal(
+        sample_ids, np.arange(len(sample_ids), dtype=sample_ids.dtype)
+    ):
         raise ValueError("label sample_id must be contiguous and ordered")
-    return sample_ids.astype(np.int32), months.astype(np.int16), target.astype(np.float32)
+    return (
+        sample_ids.astype(np.int32),
+        months.astype(np.int16),
+        target.astype(np.float32),
+    )
 
 
 def run_baselines(
@@ -61,7 +73,9 @@ def run_baselines(
     manifests = store.manifests(Split.TRAIN, max_samples=max_samples)
     identity = fingerprint(
         {
-            "features": {name: manifest.content_digest for name, manifest in manifests.items()},
+            "features": {
+                name: manifest.content_digest for name, manifest in manifests.items()
+            },
             "scope": "full" if max_samples is None else f"sample_limit_{max_samples}",
         }
     )
@@ -86,6 +100,15 @@ def train_oof(
     objective_alpha: float | None = None,
     target_normalization: str = "none",
     derived_feature_sets: tuple[str, ...] = (),
+    learning_rate: float | None = None,
+    num_leaves: int | None = None,
+    min_data_in_leaf: int | None = None,
+    feature_fraction: float | None = None,
+    bagging_fraction: float | None = None,
+    lambda_l2: float | None = None,
+    max_bin: int | None = None,
+    max_rounds: int | None = None,
+    early_stopping_rounds: int | None = None,
 ) -> tuple[str, dict]:
     experiment = _experiment_payload(
         exclude_patterns,
@@ -99,11 +122,51 @@ def train_oof(
     if not run_seeds:
         raise ValueError("at least one seed is required")
     if objective_alpha is not None and (objective != "huber" or objective_alpha <= 0):
-        raise ValueError("objective_alpha must be positive and requires objective='huber'")
+        raise ValueError(
+            "objective_alpha must be positive and requires objective='huber'"
+        )
+    _validate_model_overrides(
+        learning_rate=learning_rate,
+        num_leaves=num_leaves,
+        min_data_in_leaf=min_data_in_leaf,
+        feature_fraction=feature_fraction,
+        bagging_fraction=bagging_fraction,
+        lambda_l2=lambda_l2,
+        max_bin=max_bin,
+        max_rounds=max_rounds,
+        early_stopping_rounds=early_stopping_rounds,
+    )
     model_config = replace(
         config.lightgbm,
         objective=config.lightgbm.objective if objective is None else objective,
         alpha=config.lightgbm.alpha if objective_alpha is None else objective_alpha,
+        learning_rate=(
+            config.lightgbm.learning_rate if learning_rate is None else learning_rate
+        ),
+        num_leaves=config.lightgbm.num_leaves if num_leaves is None else num_leaves,
+        min_data_in_leaf=(
+            config.lightgbm.min_data_in_leaf
+            if min_data_in_leaf is None
+            else min_data_in_leaf
+        ),
+        feature_fraction=(
+            config.lightgbm.feature_fraction
+            if feature_fraction is None
+            else feature_fraction
+        ),
+        bagging_fraction=(
+            config.lightgbm.bagging_fraction
+            if bagging_fraction is None
+            else bagging_fraction
+        ),
+        lambda_l2=config.lightgbm.lambda_l2 if lambda_l2 is None else lambda_l2,
+        max_bin=config.lightgbm.max_bin if max_bin is None else max_bin,
+        max_rounds=config.lightgbm.max_rounds if max_rounds is None else max_rounds,
+        early_stopping_rounds=(
+            config.lightgbm.early_stopping_rounds
+            if early_stopping_rounds is None
+            else early_stopping_rounds
+        ),
     )
     model_payload = {
         name: value for name, value in asdict(model_config).items() if value is not None
@@ -189,7 +252,12 @@ def train_oof(
             model_path = model_dir / "model.txt"
             prediction_path = model_dir / "valid_prediction.npy"
             metadata_path = model_dir / "metadata.json"
-            if resume and model_path.is_file() and prediction_path.is_file() and metadata_path.is_file():
+            if (
+                resume
+                and model_path.is_file()
+                and prediction_path.is_file()
+                and metadata_path.is_file()
+            ):
                 prediction = np.load(prediction_path, allow_pickle=False)
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                 best_iteration = int(metadata["best_iteration"])
@@ -233,7 +301,9 @@ def train_oof(
                     },
                 )
             if prediction.shape != (len(valid_index),):
-                raise ValueError(f"invalid saved prediction shape for {fold.name}/seed_{seed}")
+                raise ValueError(
+                    f"invalid saved prediction shape for {fold.name}/seed_{seed}"
+                )
             seed_predictions.append(prediction)
             best_iterations.append(best_iteration)
             seed_reports[f"{fold.name}/seed_{seed}"] = {
@@ -353,7 +423,10 @@ def predict_test(
     test_matrix = selected_test
     train_manifests = store.manifests(Split.TRAIN)
     expected_digests = run_manifest["features"]
-    if any(train_manifests[name].content_digest != digest for name, digest in expected_digests.items()):
+    if any(
+        train_manifests[name].content_digest != digest
+        for name, digest in expected_digests.items()
+    ):
         raise ValueError("current training feature content does not match the OOF run")
     sample_ids, months, target = load_labels(config)
     _validate_ids(train_matrix.sample_ids, sample_ids)
@@ -448,6 +521,29 @@ def _validate_ids(actual: np.ndarray, expected: np.ndarray) -> None:
         raise ValueError("feature sample_id values do not match labels")
 
 
+def _validate_model_overrides(**values: float | None) -> None:
+    positive = (
+        "learning_rate",
+        "num_leaves",
+        "min_data_in_leaf",
+        "max_bin",
+        "max_rounds",
+        "early_stopping_rounds",
+    )
+    for name in positive:
+        value = values[name]
+        if value is not None and value <= 0:
+            raise ValueError(f"{name} must be positive")
+    if values["num_leaves"] is not None and values["num_leaves"] < 2:
+        raise ValueError("num_leaves must be at least 2")
+    for name in ("feature_fraction", "bagging_fraction"):
+        value = values[name]
+        if value is not None and not 0 < value <= 1:
+            raise ValueError(f"{name} must satisfy 0 < value <= 1")
+    if values["lambda_l2"] is not None and values["lambda_l2"] < 0:
+        raise ValueError("lambda_l2 must be non-negative")
+
+
 def _experiment_payload(
     exclude_patterns: tuple[str, ...],
     recent_months: int | None,
@@ -465,7 +561,7 @@ def _experiment_payload(
         raise ValueError("target clip quantiles must satisfy 0 <= lower < upper <= 1")
     if target_normalization not in {"none", "monthly_std", "monthly_zscore"}:
         raise ValueError(f"unsupported target normalization: {target_normalization}")
-    supported_derived = {"order_category_ratios"}
+    supported_derived = set(DERIVED_FEATURE_SETS)
     unknown_derived = sorted(set(derived_feature_sets) - supported_derived)
     if unknown_derived:
         raise ValueError(f"unsupported derived feature sets: {unknown_derived}")
@@ -513,7 +609,7 @@ def _add_derived_features(
 ) -> FeatureMatrix:
     if not feature_sets:
         return matrix
-    unknown = sorted(set(feature_sets) - {"order_category_ratios"})
+    unknown = sorted(set(feature_sets) - set(DERIVED_FEATURE_SETS))
     if unknown:
         raise ValueError(f"unsupported derived feature sets: {unknown}")
     positions = {name: index for index, name in enumerate(matrix.names)}
@@ -532,9 +628,7 @@ def _add_derived_features(
                     :, positions[f"{prefix}__{category}_count"]
                 ]
                 category_volume = np.expm1(
-                    matrix.values[
-                        :, positions[f"{prefix}__{category}_volume_logsum"]
-                    ]
+                    matrix.values[:, positions[f"{prefix}__{category}_volume_logsum"]]
                 )
                 derived_names.extend(
                     (
@@ -548,6 +642,167 @@ def _add_derived_features(
                         _safe_float32_ratio(category_volume, volume_total),
                     )
                 )
+    if "order_pressure" in feature_sets:
+        for window in (1, 2, 5, 10, 30, 60):
+            prefix = f"order__w{window}"
+            counts, volumes = _order_category_values(matrix, positions, prefix)
+            count_pressure = _pressure(
+                counts["buy_new"] + counts["sell_cancel"],
+                counts["sell_new"] + counts["buy_cancel"],
+            )
+            volume_pressure = _pressure(
+                volumes["buy_new"] + volumes["sell_cancel"],
+                volumes["sell_new"] + volumes["buy_cancel"],
+            )
+            buy_cancel_count_rate = _safe_float32_ratio(
+                counts["buy_cancel"], counts["buy_new"] + counts["buy_cancel"]
+            )
+            sell_cancel_count_rate = _safe_float32_ratio(
+                counts["sell_cancel"], counts["sell_new"] + counts["sell_cancel"]
+            )
+            derived_names.extend(
+                (
+                    f"{prefix}__new_count_imbalance",
+                    f"{prefix}__cancel_count_imbalance",
+                    f"{prefix}__new_volume_imbalance",
+                    f"{prefix}__cancel_volume_imbalance",
+                    f"{prefix}__action_count_pressure",
+                    f"{prefix}__buy_cancel_count_rate",
+                    f"{prefix}__sell_cancel_count_rate",
+                    f"{prefix}__count_volume_pressure_divergence",
+                )
+            )
+            derived_values.extend(
+                (
+                    _pressure(counts["buy_new"], counts["sell_new"]),
+                    _pressure(counts["sell_cancel"], counts["buy_cancel"]),
+                    _pressure(volumes["buy_new"], volumes["sell_new"]),
+                    _pressure(volumes["sell_cancel"], volumes["buy_cancel"]),
+                    count_pressure,
+                    buy_cancel_count_rate,
+                    sell_cancel_count_rate,
+                    count_pressure - volume_pressure,
+                )
+            )
+    if "temporal_dynamics" in feature_sets:
+        long_order_prefix = "order__w60"
+        long_counts, _ = _order_category_values(matrix, positions, long_order_prefix)
+        long_count_pressure = _pressure(
+            long_counts["buy_new"] + long_counts["sell_cancel"],
+            long_counts["sell_new"] + long_counts["buy_cancel"],
+        )
+        for window in (1, 2, 5, 10, 30):
+            order_prefix = f"order__w{window}"
+            transaction_prefix = f"transaction__w{window}"
+            short_counts, _ = _order_category_values(matrix, positions, order_prefix)
+            short_count_pressure = _pressure(
+                short_counts["buy_new"] + short_counts["sell_cancel"],
+                short_counts["sell_new"] + short_counts["buy_cancel"],
+            )
+            pairs = (
+                (
+                    "order_signed_volume_imbalance_change",
+                    f"{order_prefix}__signed_volume_imbalance",
+                    f"{long_order_prefix}__signed_volume_imbalance",
+                ),
+                (
+                    "order_cancel_count_rate_change",
+                    f"{order_prefix}__cancel_count_rate",
+                    f"{long_order_prefix}__cancel_count_rate",
+                ),
+                (
+                    "order_cancel_volume_rate_change",
+                    f"{order_prefix}__cancel_volume_rate",
+                    f"{long_order_prefix}__cancel_volume_rate",
+                ),
+                (
+                    "transaction_count_imbalance_change",
+                    f"{transaction_prefix}__count_imbalance",
+                    "transaction__w60__count_imbalance",
+                ),
+                (
+                    "transaction_volume_imbalance_change",
+                    f"{transaction_prefix}__volume_imbalance",
+                    "transaction__w60__volume_imbalance",
+                ),
+                (
+                    "transaction_vwap_change",
+                    f"{transaction_prefix}__vwap_bps",
+                    "transaction__w60__vwap_bps",
+                ),
+                (
+                    "transaction_price_mean_change",
+                    f"{transaction_prefix}__price_bps__mean",
+                    "transaction__w60__price_bps__mean",
+                ),
+            )
+            derived_names.append(
+                f"dynamics__w{window}_w60__order_action_count_pressure_change"
+            )
+            derived_values.append(short_count_pressure - long_count_pressure)
+            for name, short_name, long_name in pairs:
+                derived_names.append(f"dynamics__w{window}_w60__{name}")
+                derived_values.append(
+                    matrix.values[:, positions[short_name]]
+                    - matrix.values[:, positions[long_name]]
+                )
+
+        for window in (5, 10, 30, 60, 180):
+            prefix = f"market__w{window}"
+            long_prefix = "market__w600"
+            normalized_std = matrix.values[
+                :, positions[f"{prefix}__mid_bps__std"]
+            ] * np.sqrt(600.0 / window)
+            normalized_long_std = matrix.values[
+                :, positions[f"{long_prefix}__mid_bps__std"]
+            ]
+            normalized_rv = matrix.values[
+                :, positions[f"{prefix}__realized_vol_bps"]
+            ] / np.sqrt(float(window))
+            normalized_long_rv = matrix.values[
+                :, positions[f"{long_prefix}__realized_vol_bps"]
+            ] / np.sqrt(600.0)
+            derived_names.extend(
+                (
+                    f"dynamics__w{window}_w600__mid_std_regime_ratio",
+                    f"dynamics__w{window}_w600__realized_vol_regime_ratio",
+                    f"dynamics__w{window}_w600__spread_mean_change",
+                    f"dynamics__w{window}_w600__mid_slope_change",
+                    f"dynamics__w{window}_w600__imbalance_l2_mean_change",
+                )
+            )
+            derived_values.extend(
+                (
+                    _safe_float32_ratio(normalized_std, normalized_long_std),
+                    _safe_float32_ratio(normalized_rv, normalized_long_rv),
+                    matrix.values[:, positions[f"{prefix}__spread_bps__mean"]]
+                    - matrix.values[:, positions[f"{long_prefix}__spread_bps__mean"]],
+                    matrix.values[:, positions[f"{prefix}__mid_bps__slope"]]
+                    - matrix.values[:, positions[f"{long_prefix}__mid_bps__slope"]],
+                    matrix.values[:, positions[f"{prefix}__imbalance_l2__mean"]]
+                    - matrix.values[:, positions[f"{long_prefix}__imbalance_l2__mean"]],
+                )
+            )
+        for window in (5, 10, 30, 60, 180, 600):
+            prefix = f"market__w{window}"
+            realized_vol = matrix.values[:, positions[f"{prefix}__realized_vol_bps"]]
+            mid_delta = matrix.values[:, positions[f"{prefix}__mid_bps__delta"]]
+            mid_range = (
+                matrix.values[:, positions[f"{prefix}__mid_bps__max"]]
+                - matrix.values[:, positions[f"{prefix}__mid_bps__min"]]
+            )
+            derived_names.extend(
+                (
+                    f"dynamics__w{window}__trend_efficiency",
+                    f"dynamics__w{window}__range_per_realized_vol",
+                )
+            )
+            derived_values.extend(
+                (
+                    _safe_float32_ratio(mid_delta, realized_vol),
+                    _safe_float32_ratio(mid_range, realized_vol),
+                )
+            )
     appended = np.column_stack(derived_values).astype(np.float32, copy=False)
     values = np.empty(
         (len(matrix.sample_ids), matrix.values.shape[1] + appended.shape[1]),
@@ -558,12 +813,33 @@ def _add_derived_features(
     return FeatureMatrix(matrix.sample_ids, values, (*matrix.names, *derived_names))
 
 
-def _safe_float32_ratio(
-    numerator: np.ndarray, denominator: np.ndarray
-) -> np.ndarray:
+def _safe_float32_ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
     result = np.zeros(len(numerator), dtype=np.float32)
     np.divide(numerator, denominator, out=result, where=denominator > 0)
     return result
+
+
+def _pressure(positive: np.ndarray, negative: np.ndarray) -> np.ndarray:
+    return _safe_float32_ratio(positive - negative, positive + negative)
+
+
+def _order_category_values(
+    matrix: FeatureMatrix,
+    positions: dict[str, int],
+    prefix: str,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    categories = ("buy_new", "buy_cancel", "sell_new", "sell_cancel")
+    counts = {
+        category: matrix.values[:, positions[f"{prefix}__{category}_count"]]
+        for category in categories
+    }
+    volumes = {
+        category: np.expm1(
+            matrix.values[:, positions[f"{prefix}__{category}_volume_logsum"]]
+        )
+        for category in categories
+    }
+    return counts, volumes
 
 
 def _restrict_to_recent_months(
@@ -631,7 +907,9 @@ def _recency_weights(months: np.ndarray, half_life: float | None) -> np.ndarray:
     return weights
 
 
-def _baseline_gate(model_folds: dict[str, dict], baseline_folds: dict[str, dict]) -> dict:
+def _baseline_gate(
+    model_folds: dict[str, dict], baseline_folds: dict[str, dict]
+) -> dict:
     fold_names = tuple(model_folds)
     model_scores = np.asarray(
         [model_folds[name]["global_score"] for name in fold_names], dtype=np.float64

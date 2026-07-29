@@ -12,9 +12,12 @@ from mscapital.contracts import Split, TableName
 from mscapital.data.canonical import CanonicalStore
 from mscapital.data.catalog import DataCatalog, failed_validations
 from mscapital.features.store import FEATURE_BLOCKS, FeatureStore
+from mscapital.training.blend import blend_runs
 from mscapital.training.ensemble import ensemble_runs
+from mscapital.training.postprocess import postprocess_run
 from mscapital.training.submission import make_submission
 from mscapital.training.tabular import (
+    DERIVED_FEATURE_SETS,
     predict_test,
     read_metrics,
     run_baselines,
@@ -92,10 +95,19 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument(
         "--derived-feature-set",
         action="append",
-        choices=("order_category_ratios",),
+        choices=DERIVED_FEATURE_SETS,
         default=[],
         help="Add deterministic features derived from the cached matrix",
     )
+    train.add_argument("--learning-rate", type=float)
+    train.add_argument("--num-leaves", type=int)
+    train.add_argument("--min-data-in-leaf", type=int)
+    train.add_argument("--feature-fraction", type=float)
+    train.add_argument("--bagging-fraction", type=float)
+    train.add_argument("--lambda-l2", type=float)
+    train.add_argument("--max-bin", type=int)
+    train.add_argument("--max-rounds", type=int)
+    train.add_argument("--early-stopping-rounds", type=int)
 
     evaluate = subparsers.add_parser("evaluate-oof", help="Print saved OOF metrics")
     evaluate.add_argument("--run-id", required=True)
@@ -119,6 +131,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ensemble.add_argument("--run-id", nargs="+", required=True)
     ensemble.add_argument("--weight", nargs="+", type=float)
+
+    blend = subparsers.add_parser(
+        "blend-runs", help="Blend aligned OOF/test predictions across configurations"
+    )
+    blend.add_argument("--run-id", nargs="+", required=True)
+    blend.add_argument("--weight", nargs="+", type=float)
+    blend.add_argument("--no-normalize", action="store_false", dest="normalize")
+    blend.set_defaults(normalize=True)
+
+    postprocess = subparsers.add_parser(
+        "postprocess-run", help="Apply deterministic signed-power calibration"
+    )
+    postprocess.add_argument("--run-id", required=True)
+    postprocess.add_argument("--power", required=True, type=float)
+    postprocess.add_argument("--center", action="store_true")
 
     deep = subparsers.add_parser(
         "train-deep", help="Train rolling Market/Transaction deep sequence models"
@@ -276,6 +303,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             objective_alpha=args.objective_alpha,
             target_normalization=args.target_normalization,
             derived_feature_sets=tuple(args.derived_feature_set),
+            learning_rate=args.learning_rate,
+            num_leaves=args.num_leaves,
+            min_data_in_leaf=args.min_data_in_leaf,
+            feature_fraction=args.feature_fraction,
+            bagging_fraction=args.bagging_fraction,
+            lambda_l2=args.lambda_l2,
+            max_bin=args.max_bin,
+            max_rounds=args.max_rounds,
+            early_stopping_rounds=args.early_stopping_rounds,
         )
         print(json.dumps(metrics, ensure_ascii=False, indent=2))
         print(f"Run ID: {run_id}")
@@ -307,6 +343,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(metrics, ensure_ascii=False, indent=2))
         print(f"Run ID: {ensemble_id}")
+        return 0
+
+    if args.command == "blend-runs":
+        blend_id, metrics = blend_runs(
+            config,
+            tuple(args.run_id),
+            weights=tuple(args.weight) if args.weight is not None else None,
+            normalize=args.normalize,
+        )
+        print(json.dumps(metrics, ensure_ascii=False, indent=2))
+        print(f"Run ID: {blend_id}")
+        return 0
+
+    if args.command == "postprocess-run":
+        processed_id, metrics = postprocess_run(
+            config, args.run_id, power=args.power, center=args.center
+        )
+        print(json.dumps(metrics, ensure_ascii=False, indent=2))
+        print(f"Run ID: {processed_id}")
         return 0
 
     if args.command == "train-deep":
