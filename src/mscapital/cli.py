@@ -12,6 +12,7 @@ from mscapital.contracts import Split, TableName
 from mscapital.data.canonical import CanonicalStore
 from mscapital.data.catalog import DataCatalog, failed_validations
 from mscapital.features.store import FEATURE_BLOCKS, FeatureStore
+from mscapital.research.rounds import run_research
 from mscapital.training.blend import blend_runs
 from mscapital.training.ensemble import ensemble_runs
 from mscapital.training.postprocess import postprocess_run
@@ -108,6 +109,23 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--max-bin", type=int)
     train.add_argument("--max-rounds", type=int)
     train.add_argument("--early-stopping-rounds", type=int)
+
+    research = subparsers.add_parser(
+        "research-20", help="Run the fixed 20-round offline LightGBM research queue"
+    )
+    research.add_argument("--round", action="append", type=int, default=[])
+    research.add_argument("--resume", action="store_true")
+    research.add_argument(
+        "--min-free-gb",
+        type=float,
+        default=0.0,
+        help="Abort before a round if available Windows RAM is below this value",
+    )
+    research.add_argument(
+        "--threads",
+        type=int,
+        help="Override LightGBM CPU threads for every round",
+    )
 
     evaluate = subparsers.add_parser("evaluate-oof", help="Print saved OOF metrics")
     evaluate.add_argument("--run-id", required=True)
@@ -315,6 +333,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(metrics, ensure_ascii=False, indent=2))
         print(f"Run ID: {run_id}")
+        return 0
+
+    if args.command == "research-20":
+        ledger = run_research(
+            config,
+            rounds=tuple(args.round) if args.round else None,
+            resume=args.resume,
+            min_free_gb=args.min_free_gb,
+            threads=args.threads,
+        )
+        print(json.dumps(ledger, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "evaluate-oof":

@@ -175,8 +175,11 @@ def train_oof(
     loaded_matrix = feature_store.load_matrix(Split.TRAIN, blocks)
     sample_ids, months, target = load_labels(config)
     _validate_ids(loaded_matrix.sample_ids, sample_ids)
+    available_baseline_features = tuple(
+        name for name in BASELINE_FEATURES.values() if name in loaded_matrix.names
+    )
     baseline_matrix = _select_exact_features(
-        loaded_matrix, tuple(BASELINE_FEATURES.values())
+        loaded_matrix, available_baseline_features
     )
     augmented_matrix = _add_derived_features(
         loaded_matrix, tuple(experiment["derived_feature_sets"])
@@ -914,7 +917,7 @@ def _baseline_gate(
     model_scores = np.asarray(
         [model_folds[name]["global_score"] for name in fold_names], dtype=np.float64
     )
-    baseline_names = tuple(next(iter(baseline_folds.values())))
+    baseline_names = tuple(next(iter(baseline_folds.values()), {}))
     baseline_means = {
         baseline: float(
             np.mean(
@@ -924,6 +927,17 @@ def _baseline_gate(
         for baseline in baseline_names
         if all("global_score" in baseline_folds[fold][baseline] for fold in fold_names)
     }
+    if not baseline_means:
+        return {
+            "passed": None,
+            "model_fold_mean": float(model_scores.mean()),
+            "best_baseline": None,
+            "best_baseline_fold_mean": None,
+            "mean_passed": None,
+            "late_folds": {},
+            "late_folds_passed": None,
+            "action_if_failed": "no compatible single-signal baseline is available",
+        }
     best_baseline = max(baseline_means, key=baseline_means.get)
     late_folds = fold_names[-2:]
     late_comparisons = {
